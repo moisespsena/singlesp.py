@@ -12,6 +12,7 @@ import threading
 import time
 from subprocess import Popen, PIPE
 
+
 class Manager(object):
     def __init__(self):
         self.threads = []
@@ -25,7 +26,26 @@ class Manager(object):
         threads = [threading.Thread(target=cb, args=args, kwargs=kwargs) for cb, args, kwargs in cbs]
         self.threads.extend(map(lambda t: t.start() or t, threads))
 
+    def proc(self, *args, **kwargs):
+        kwargs['mgr'] = self
+        return Proc(*args, **kwargs)
+
+
 MANAGER = Manager()
+
+
+class Reader(object):
+    def __init__(self, proc, handle):
+        self.proc = proc
+        self.handle = handle
+        self.read = handle.read
+        self.readline = handle.readline
+
+    def __call__(self, buf=1024):
+        return iter(lambda: self.read(buf), '')
+
+    def __iter__(self):
+        return iter(self.readline, '')
 
 
 class Proc(object):
@@ -41,7 +61,6 @@ class Proc(object):
         self.p = None
         self.pipe_to = False
         self.pipe_from = False
-        self._status = None
 
     @property
     def stdin(self):
@@ -61,38 +80,47 @@ class Proc(object):
         return self.stdout.read(*args, **kwargs)
 
     @property
-    def readline(self):
-        return self.stdout.readline
-
-    @property
-    def returncode(self):
-        return self.p.returncode
-
-    @property
     def write(self):
         return self.stdin.write
 
-    def output(self, buffer=4):
-        return iter(lambda: self.read(buffer), '')
+    @property
+    def out(self):
+        return Reader(self, self.stdout)
+
+    @property
+    def err(self):
+        return Reader(self, self.stderr)
 
     def __iter__(self):
-        return iter(self.readline, '')
+        return self.out()
 
-    def error(self, buffer=None, all=False):
-        if all:
-            return self.stderr.read()
-        elif buffer:
-            return iter(lambda: self.stderr.read(buffer), '')
-        else:
-            return iter(self.stderr.readline, '')
-
-    def run(self):
+    def _run(self):
         assert not self.p, "Proc is running."
         self.callbacks.append(lambda p: p.wait())
         self.p = Popen(*self.args, **self.kwargs)
 
         if self.callbacks:
             self.mgr.run([(fn, (self,), {}) for fn in self.callbacks])
+
+    def run(self):
+        assert not self.pipe_to
+
+        if self.pipe_from and not self.pipe_to:
+            assert not self.pipe_from.p
+            pipes = []
+            pf = self
+
+            while pf:
+                pipes.append(pf)
+                pf = pf.pipe_from
+
+            i = len(pipes) - 1
+            while i > 0:
+                pipes[i]._run()
+                pipes[i - 1].kwargs['stdin'] = pipes[i].stdout
+                i -= 1
+
+        self._run()
 
         return self
 
@@ -113,8 +141,6 @@ class Proc(object):
         self.pipe_to = proc
         proc.pipe_from = self
         self.kwargs['stdout'] = PIPE
-        self.run()
-        proc.kwargs['stdin'] = self.stdout
 
         return proc
 
@@ -126,19 +152,42 @@ class Proc(object):
 
     @property
     def status(self):
-        if not self._status is None:
-            return self._status
-        return self.returncode
+        return self.p.returncode
 
     def __repr__(self):
-        return "%r%s" % (self.args, (' < (%r)' % self.pipe_from if self.pipe_from else ''))
+        return "Proc(*%r)%s" % (self.args, (' < (%r)' % self.pipe_from if self.pipe_from else ''))
+
+    def __gt__(self, other):
+        self.callbacks.append(lambda self: other(Reader(self, self.stdout)))
+        return self
 
 
 def wait():
     return MANAGER.wait()
 
 
-class SSH(object):
+def proc_factory(name, cmd=None):
+    if cmd is None:
+        cmd = (name,)
+
+    def alias(*args, **kwargs):
+        cmd_ = cmd
+        if args:
+            assert isinstance(args[0], (list, tuple))
+            cmd_ = cmd_ + tuple(args[0])
+        return Proc(cmd_, **kwargs)
+
+    alias.__name__ = name
+    return alias
+
+
+bash = proc_factory('bash')
+sh = proc_factory('sh')
+git = proc_factory('git')
+pwd = proc_factory('pwd')
+
+
+class SSHFactory(object):
     def __init__(self, host, user, password, port=22):
         self.host, self.user, self.password, self.port = host, user, password, port
 
@@ -157,34 +206,37 @@ class Input(object):
         self.it = it
 
     def __or__(self, other):
-        if not isinstance(other, Proc):
-            assert isinstance(other, tuple)
-            args, kwargs = other[0], {} if len(other) == 1 else other[1]
-            return self.pipe(*args, **kwargs)
         return self.pipe(other)
 
-    def pipe(self, *args, **kwargs):
-        def writer(p):
-            for v in self.it:
-                p.write("(%s) && " % v)
-            p.write("true")
-            p.stdin.close()
+    def writer(self, proc):
+        for v in self.it:
+            proc.write(v)
+        proc.stdin.close()
 
-        other = Proc(*args, **kwargs)
-        other.kwargs['stdin'] = PIPE
-        other.callbacks.append(writer)
-        return other
+    def pipe(self, proc):
+        proc.kwargs['stdin'] = PIPE
+        proc.callbacks.append(self.writer)
+        return proc
+
+
+class Commands(Input):
+    def writer(self, proc):
+        for v in self.it:
+            proc.write("(%s) && " % v)
+        proc.write("true")
+        proc.stdin.close()
+
 
 def cb_stdout(p):
-    for line in p:
+    for line in p.out():
         print("STDOUT: %r" % line)
 
 def a_stderr(p):
-    for line in p.error():
+    for line in p.err():
         print("A-STDERR: %r" % line)
 
 def b_stderr(p):
-    for line in p.error():
+    for line in p.err():
         print("B-STDERR: %r" % line)
 
 p = Proc('echo "[A] error message" >&2;seq 1 3', callbacks=[a_stderr]) | \
