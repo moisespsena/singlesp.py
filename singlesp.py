@@ -225,22 +225,3 @@ class Commands(Input):
             proc.write("(%s) && " % v)
         proc.write("true")
         proc.stdin.close()
-
-
-def cb_stdout(p):
-    for line in p.out():
-        print("STDOUT: %r" % line)
-
-def a_stderr(p):
-    for line in p.err():
-        print("A-STDERR: %r" % line)
-
-def b_stderr(p):
-    for line in p.err():
-        print("B-STDERR: %r" % line)
-
-p = Proc('echo "[A] error message" >&2;seq 1 3', callbacks=[a_stderr]) | \
-    Proc('while read l; do echo "i= $l"; echo "[B] i in err: $l" >&2; done',
-     callbacks=[cb_stdout, b_stderr])
-p.run()
-wait()
