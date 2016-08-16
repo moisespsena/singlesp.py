@@ -55,7 +55,7 @@ class CleanCommand(Command):
 
 setup(
     name="singlesp",
-    version='1.0.0',
+    version='1.0.1',
     author="Moises P. Sena",
     author_email="moisespsena@gmail.com",
     description="Simple uses for Python subproccess module",
