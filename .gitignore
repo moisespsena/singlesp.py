@@ -1,3 +1,5 @@
 .*
 ~*
 singlesp.egg*
+*.pyc
+dist
